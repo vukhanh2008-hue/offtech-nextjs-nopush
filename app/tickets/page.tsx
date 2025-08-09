@@ -1,110 +1,285 @@
-'use client';
-import { useEffect, useState } from 'react';
-import { supabase } from '../../lib/supabaseClient';
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Ticket = {
-  id:string; title:string; status:'Open'|'In_Progress'|'On_Hold'|'Resolved'|'Closed';
-  mode:'Online'|'Onsite'; province:string|null; ward:string|null; assignee_id:string|null;
+  id: string;
+  title: string;
+  province: string | null;
+  ward: string | null;
+  mode: "Online" | "Onsite";
+  status: "Open" | "In_Progress" | "On_Hold" | "Resolved" | "Closed";
 };
 
-export default function TicketsPage(){
-  const [rows, setRows] = useState<Ticket[]>([]);
-  const [status, setStatus] = useState<string>('Open');
-  const [province, setProvince] = useState('');
-  const [ward, setWard] = useState('');
+const MODES = ["Online", "Onsite"] as const;
+const STATUS = ["Open", "In_Progress", "Resolved", "Closed"] as const;
+
+export default function TicketsPage() {
+  const router = useRouter();
+
+  // filters
+  const [statusFilter, setStatusFilter] =
+    useState<Ticket["status"]>("Open");
   const [onlyMine, setOnlyMine] = useState(true);
 
-  // Form tạo mới
-  const [title, setTitle] = useState('');
-  const [mode, setMode] = useState<'Online'|'Onsite'>('Online');
+  // data
+  const [rows, setRows] = useState<Ticket[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function load(){
-    let q = supabase.from('tickets')
-      .select('id,title,status,mode,province,ward,assignee_id')
-      .order('created_at', {ascending:false});
+  // create form
+  const [title, setTitle] = useState("");
+  const [province, setProvince] = useState("");
+  const [ward, setWard] = useState("");
+  const [mode, setMode] = useState<Ticket["mode"]>("Online");
 
-    if(status) q = q.eq('status', status);
-    if(province) q = q.ilike('province', `%${province}%`);
-    if(ward) q = q.ilike('ward', `%${ward}%`);
+  // ====== data loader (giữ nguyên endpoint list hiện có của bạn) ======
+  async function load() {
+    setLoading(true);
+    try {
+      const qs = new URLSearchParams({
+        status: statusFilter,
+        mine: String(onlyMine),
+      }).toString();
 
-    if(onlyMine){
-      const { data: { user } } = await supabase.auth.getUser();
-      if(user) q = q.or(`assignee_id.eq.${user.id},created_by.eq.${user.id}`);
+      const res = await fetch(`/api/tickets/list?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as Ticket[];
+      setRows(data);
+    } finally {
+      setLoading(false);
     }
-    const { data, error } = await q;
-    if(error) alert(error.message);
-    setRows(data || []);
   }
 
-  useEffect(()=>{ load(); }, [status, province, ward, onlyMine]);
-  useEffect(()=>{
-    const sub = supabase.channel('tickets-rt')
-      .on('postgres_changes', { event:'*', schema:'public', table:'tickets' }, load)
-      .subscribe();
-    return ()=> { supabase.removeChannel(sub); };
-  },[]);
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, onlyMine]);
 
-  async function createTicket(){
-    if(!title.trim()) return alert('Nhập tiêu đề');
-    const { data: { user } } = await supabase.auth.getUser();
-    const { error } = await supabase.from('tickets').insert({
-      title, mode, province: province || null, ward: ward || null, created_by: user?.id || null, assignee_id: user?.id || null
-    });
-    if(error) alert(error.message);
-    else{ setTitle(''); await load(); }
+  // ====== HOTFIX handlers ======
+  async function startTicket(id: string) {
+    try {
+      setBusyId(id);
+
+      // optimistic UI
+      setRows(prev => prev.map(r => (r.id === id ? { ...r, status: "In_Progress" } : r)));
+
+      const res = await fetch("/api/tickets/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+
+      // chuyển filter để thấy ngay vé vừa đổi
+      setStatusFilter("In_Progress");
+      router.refresh();
+    } catch (e) {
+      // revert nếu lỗi
+      setRows(prev => prev.map(r => (r.id === id ? { ...r, status: "Open" } : r)));
+      alert("Không thể Start ticket. Vui lòng thử lại.");
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  async function updateStatus(id:string, next:Ticket['status']){
-    const { error } = await supabase.from('tickets').update({ status: next }).eq('id', id);
-    if(error) alert(error.message);
+  async function resolveTicket(id: string) {
+    try {
+      setBusyId(id);
+
+      // optimistic
+      setRows(prev => prev.map(r => (r.id === id ? { ...r, status: "Resolved" } : r)));
+
+      const res = await fetch("/api/tickets/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+
+      setStatusFilter("Resolved");
+      router.refresh();
+      setTimeout(() => {
+        alert("Đã đánh dấu Resolved. Vé đã xuất hiện ở mục Approvals cho Manager.");
+      }, 100);
+    } catch (e) {
+      setRows(prev => prev.map(r => (r.id === id ? { ...r, status: "In_Progress" } : r)));
+      alert("Không thể đánh dấu Resolved. Vui lòng thử lại.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // tạo ticket (giữ endpoint create của bạn)
+  async function createTicket() {
+    if (!title.trim()) {
+      alert("Nhập tiêu đề");
+      return;
+    }
+    setBusyId("create");
+    try {
+      const res = await fetch("/api/tickets/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          province: province || null,
+          ward: ward || null,
+          mode,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+
+      setTitle("");
+      setProvince("");
+      setWard("");
+      // sau khi tạo thì vẫn đang ở filter Open → load lại
+      await load();
+      router.refresh();
+    } catch (e) {
+      alert("Không thể tạo ticket. Vui lòng thử lại.");
+    } finally {
+      setBusyId(null);
+    }
   }
 
   return (
-    <main style={{padding:16}}>
-      <h2>Tickets</h2>
+    <div className="mx-auto max-w-4xl p-4">
+      <h1 className="text-3xl font-bold mb-6">Tickets</h1>
 
-      {/* Form tạo ticket */}
-      <div style={{padding:12, border:'1px solid #eee', borderRadius:8, marginBottom:12}}>
-        <h3 style={{marginTop:0}}>Tạo ticket mới</h3>
-        <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
-          <input placeholder="Tiêu đề" value={title} onChange={e=>setTitle(e.target.value)} />
-          <input placeholder="Tỉnh/Thành phố" value={province} onChange={e=>setProvince(e.target.value)} />
-          <input placeholder="Phường/Xã" value={ward} onChange={e=>setWard(e.target.value)} />
-          <select value={mode} onChange={e=>setMode(e.target.value as any)}>
-            <option value="Online">Online</option>
-            <option value="Onsite">Onsite</option>
-          </select>
-          <button onClick={createTicket}>Tạo</button>
+      {/* Create box */}
+      <div className="border rounded-md p-4 mb-6">
+        <h2 className="font-semibold text-xl mb-3">Tạo ticket mới</h2>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Tiêu đề"
+            className="border rounded px-3 py-2"
+          />
+          <input
+            value={province}
+            onChange={e => setProvince(e.target.value)}
+            placeholder="Tỉnh/Thành phố"
+            className="border rounded px-3 py-2"
+          />
+          <input
+            value={ward}
+            onChange={e => setWard(e.target.value)}
+            placeholder="Phường/Xã"
+            className="border rounded px-3 py-2"
+          />
+          <div className="flex gap-2">
+            <select
+              value={mode}
+              onChange={e => setMode(e.target.value as Ticket["mode"])}
+              className="border rounded px-3 py-2"
+            >
+              {MODES.map(m => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <button
+              disabled={busyId === "create"}
+              onClick={createTicket}
+              className="border rounded px-4 py-2"
+            >
+              Tạo
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Bộ lọc */}
-      <div style={{display:'flex', gap:8, marginBottom:12, flexWrap:'wrap'}}>
-        <select value={status} onChange={e=>setStatus(e.target.value)}>
-          {['Open','In_Progress','On_Hold','Resolved','Closed'].map(s=> <option key={s}>{s}</option>)}
+      {/* Filters */}
+      <div className="flex items-center gap-4 mb-3">
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value as Ticket["status"])}
+          className="border rounded px-3 py-2"
+        >
+          {STATUS.map(s => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
         </select>
-        <label><input type="checkbox" checked={onlyMine} onChange={e=>setOnlyMine(e.target.checked)} /> Chỉ của tôi</label>
+
+        <label className="inline-flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={onlyMine}
+            onChange={e => setOnlyMine(e.target.checked)}
+          />
+          <span>Chỉ của tôi</span>
+        </label>
       </div>
 
-      <table width="100%" style={{fontSize:14, borderCollapse:'collapse'}}>
-        <thead>
-          <tr><th style={{textAlign:'left'}}>Tiêu đề</th><th>Địa bàn</th><th>Mode</th><th>Trạng thái</th><th>Hành động</th></tr>
-        </thead>
-        <tbody>
-          {rows.map(r => (
-            <tr key={r.id}>
-              <td>{r.title}</td>
-              <td style={{textAlign:'center'}}>{r.province || '-'} / {r.ward || '-'}</td>
-              <td style={{textAlign:'center'}}>{r.mode}</td>
-              <td style={{textAlign:'center'}}>{r.status}</td>
-              <td style={{textAlign:'center'}}>
-                {r.status==='Open' && <button onClick={()=>updateStatus(r.id,'In_Progress')}>Start</button>}
-                {r.status==='In_Progress' && <button onClick={()=>updateStatus(r.id,'Resolved')}>Mark Resolved</button>}
-              </td>
+      {/* Table */}
+      <div className="overflow-x-auto">
+        <table className="min-w-full border rounded">
+          <thead>
+            <tr className="bg-gray-50">
+              <th className="text-left p-2">Tiêu đề</th>
+              <th className="text-left p-2">Địa bàn</th>
+              <th className="text-left p-2">Mode</th>
+              <th className="text-left p-2">Trạng thái</th>
+              <th className="text-left p-2">Hành động</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </main>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td className="p-3" colSpan={5}>
+                  Đang tải…
+                </td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td className="p-3" colSpan={5}>
+                  Không có ticket.
+                </td>
+              </tr>
+            ) : (
+              rows.map(r => (
+                <tr key={r.id} className="border-t">
+                  <td className="p-2">{r.title}</td>
+                  <td className="p-2">
+                    {(r.province || "-")} / {(r.ward || "-")}
+                  </td>
+                  <td className="p-2">{r.mode}</td>
+                  <td className="p-2">{r.status}</td>
+                  <td className="p-2">
+                    {r.status === "Open" && (
+                      <button
+                        disabled={busyId === r.id}
+                        onClick={() => startTicket(r.id)}
+                        className="border rounded px-3 py-1"
+                      >
+                        Start
+                      </button>
+                    )}
+                    {r.status === "In_Progress" && (
+                      <button
+                        disabled={busyId === r.id}
+                        onClick={() => resolveTicket(r.id)}
+                        className="border rounded px-3 py-1"
+                      >
+                        Mark Resolved
+                      </button>
+                    )}
+                    {r.status !== "Open" && r.status !== "In_Progress" && (
+                      <span className="text-gray-500">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
-}
+        }
