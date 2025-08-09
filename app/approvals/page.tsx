@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { supabase } from '../../lib/supabaseClient';
 type Row = { id:string; title:string; province:string|null; ward:string|null; assignee_id:string|null; resolved_at:string|null };
 export default function Approvals(){
   const [rows,setRows] = useState<Row[]>([]);
