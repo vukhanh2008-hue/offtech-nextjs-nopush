@@ -34,7 +34,7 @@ export default function TicketsPage() {
   const [ward, setWard] = useState("");
   const [mode, setMode] = useState<Ticket["mode"]>("Online");
 
-  // ====== data loader (giữ nguyên endpoint list hiện có của bạn) ======
+  // ====== data loader (giữ nguyênnn endpoint list hiện có của bạn) ======
   async function load() {
     setLoading(true);
     try {
