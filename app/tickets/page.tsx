@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { supabase } from '../../lib/supabaseClient';
 type Ticket = { id:string; title:string; status:string; mode:string; province:string|null; ward:string|null; assignee_id:string|null };
 export default function TicketsPage(){
   const [rows, setRows] = useState<Ticket[]>([]);
