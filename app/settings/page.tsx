@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { supabase } from '../../lib/supabaseClient';
 export default function Settings(){
   const [start, setStart] = useState('22:00');
   const [end, setEnd] = useState('07:00');
